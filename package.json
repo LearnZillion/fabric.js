@@ -71,10 +71,6 @@
     "prettier:check": "prettier --check .",
     "prettier:write": "prettier --write ."
   },
-  "optionalDependencies": {
-    "canvas": "^2.8.0",
-    "jsdom": "^19.0.0"
-  },
   "devDependencies": {
     "@rollup/plugin-commonjs": "^22.0.2",
     "@rollup/plugin-json": "^4.1.0",
