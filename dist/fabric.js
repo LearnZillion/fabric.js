@@ -1,7 +1,7 @@
-/* build: `node build.js modules=ALL exclude=gestures,accessors,erasing requirejs minifier=uglifyjs` */
+/* build: `node build.js modules=ALL exclude=gestures,accessors requirejs sourcemap minifier=uglifyjs` */
 /*! Fabric.js Copyright 2008-2015, Printio (Juriy Zaytsev, Maxim Chernyak) */
 
-var fabric = fabric || { version: '5.1.0' };
+var fabric = fabric || { version: '5.3.0' };
 if (typeof exports !== 'undefined') {
   exports.fabric = fabric;
 }
@@ -1274,6 +1274,9 @@ fabric.CommonMethods = {
     groupSVGElements: function(elements, options, path) {
       var object;
       if (elements && elements.length === 1) {
+        if (typeof path !== 'undefined') {
+          elements[0].sourcePath = path;
+        }
         return elements[0];
       }
       if (options) {
@@ -1304,7 +1307,7 @@ fabric.CommonMethods = {
      * @return {Array} properties Properties names to include
      */
     populateWithProperties: function(source, destination, properties) {
-      if (properties && Object.prototype.toString.call(properties) === '[object Array]') {
+      if (properties && Array.isArray(properties)) {
         for (var i = 0, len = properties.length; i < len; i++) {
           if (properties[i] in source) {
             destination[properties[i]] = source[properties[i]];
@@ -1838,6 +1841,114 @@ fabric.CommonMethods = {
       }
       return new fabric.Group([a], { clipPath: b, inverted: inverted });
     },
+
+    /**
+     * @memberOf fabric.util
+     * @param {Object} prevStyle first style to compare
+     * @param {Object} thisStyle second style to compare
+     * @param {boolean} forTextSpans whether to check overline, underline, and line-through properties
+     * @return {boolean} true if the style changed
+     */
+    hasStyleChanged: function(prevStyle, thisStyle, forTextSpans) {
+      forTextSpans = forTextSpans || false;
+      return (prevStyle.fill !== thisStyle.fill ||
+              prevStyle.stroke !== thisStyle.stroke ||
+              prevStyle.strokeWidth !== thisStyle.strokeWidth ||
+              prevStyle.fontSize !== thisStyle.fontSize ||
+              prevStyle.fontFamily !== thisStyle.fontFamily ||
+              prevStyle.fontWeight !== thisStyle.fontWeight ||
+              prevStyle.fontStyle !== thisStyle.fontStyle ||
+              prevStyle.textBackgroundColor !== thisStyle.textBackgroundColor ||
+              prevStyle.deltaY !== thisStyle.deltaY) ||
+              (forTextSpans &&
+                (prevStyle.overline !== thisStyle.overline ||
+                prevStyle.underline !== thisStyle.underline ||
+                prevStyle.linethrough !== thisStyle.linethrough));
+    },
+
+    /**
+     * Returns the array form of a text object's inline styles property with styles grouped in ranges
+     * rather than per character. This format is less verbose, and is better suited for storage
+     * so it is used in serialization (not during runtime).
+     * @memberOf fabric.util
+     * @param {object} styles per character styles for a text object
+     * @param {String} text the text string that the styles are applied to
+     * @return {{start: number, end: number, style: object}[]}
+     */
+    stylesToArray: function(styles, text) {
+      // clone style structure to prevent mutation
+      var styles = fabric.util.object.clone(styles, true),
+          textLines = text.split('\n'),
+          charIndex = -1, prevStyle = {}, stylesArray = [];
+      //loop through each textLine
+      for (var i = 0; i < textLines.length; i++) {
+        if (!styles[i]) {
+          //no styles exist for this line, so add the line's length to the charIndex total
+          charIndex += textLines[i].length;
+          continue;
+        }
+        //loop through each character of the current line
+        for (var c = 0; c < textLines[i].length; c++) {
+          charIndex++;
+          var thisStyle = styles[i][c];
+          //check if style exists for this character
+          if (thisStyle && Object.keys(thisStyle).length > 0) {
+            var styleChanged = fabric.util.hasStyleChanged(prevStyle, thisStyle, true);
+            if (styleChanged) {
+              stylesArray.push({
+                start: charIndex,
+                end: charIndex + 1,
+                style: thisStyle
+              });
+            }
+            else {
+              //if style is the same as previous character, increase end index
+              stylesArray[stylesArray.length - 1].end++;
+            }
+          }
+          prevStyle = thisStyle || {};
+        }
+      }
+      return stylesArray;
+    },
+
+    /**
+     * Returns the object form of the styles property with styles that are assigned per
+     * character rather than grouped by range. This format is more verbose, and is
+     * only used during runtime (not for serialization/storage)
+     * @memberOf fabric.util
+     * @param {Array} styles the serialized form of a text object's styles
+     * @param {String} text the text string that the styles are applied to
+     * @return {Object}
+     */
+    stylesFromArray: function(styles, text) {
+      if (!Array.isArray(styles)) {
+        return styles;
+      }
+      var textLines = text.split('\n'),
+          charIndex = -1, styleIndex = 0, stylesObject = {};
+      //loop through each textLine
+      for (var i = 0; i < textLines.length; i++) {
+        //loop through each character of the current line
+        for (var c = 0; c < textLines[i].length; c++) {
+          charIndex++;
+          //check if there's a style collection that includes the current character
+          if (styles[styleIndex]
+            && styles[styleIndex].start <= charIndex
+            && charIndex < styles[styleIndex].end) {
+            //create object for line index if it doesn't exist
+            stylesObject[i] = stylesObject[i] || {};
+            //assign a style at this character's index
+            stylesObject[i][c] = Object.assign({}, styles[styleIndex].style);
+            //if character is at the end of the current style collection, move to the next
+            if (charIndex === styles[styleIndex].end - 1) {
+              styleIndex++;
+            }
+          }
+        }
+      }
+      return stylesObject;
+    }
   };
 })(typeof exports !== 'undefined' ? exports : this);
 
@@ -3155,7 +3266,7 @@ fabric.CommonMethods = {
         var normalizedProperty = (property === 'float' || property === 'cssFloat')
           ? (typeof elementStyle.styleFloat === 'undefined' ? 'cssFloat' : 'styleFloat')
           : property;
-        elementStyle[normalizedProperty] = styles[property];
+        elementStyle.setProperty(normalizedProperty, styles[property]);
       }
     }
     return element;
@@ -4382,8 +4493,7 @@ fabric.warn = console.warn;
   }
 
   function normalizeValue(attr, value, parentAttributes, fontSize) {
-    var isArray = Object.prototype.toString.call(value) === '[object Array]',
-        parsed;
+    var isArray = Array.isArray(value), parsed;
 
     if ((attr === 'fill' || attr === 'stroke') && value === 'none') {
       value = '';
@@ -4781,7 +4891,7 @@ fabric.warn = console.warn;
         return;
       }
 
-      var xlink = xlinkAttribute.substr(1),
+      var xlink = xlinkAttribute.slice(1),
           x = el.getAttribute('x') || 0,
           y = el.getAttribute('y') || 0,
           el2 = elementById(doc, xlink).cloneNode(true),
@@ -5053,7 +5163,7 @@ fabric.warn = console.warn;
   function recursivelyParseGradientsXlink(doc, gradient) {
     var gradientsAttrs = ['gradientTransform', 'x1', 'x2', 'y1', 'y2', 'gradientUnits', 'cx', 'cy', 'r', 'fx', 'fy'],
         xlinkAttr = 'xlink:href',
-        xLink = gradient.getAttribute(xlinkAttr).substr(1),
+        xLink = gradient.getAttribute(xlinkAttr).slice(1),
         referencedGradient = elementById(doc, xLink);
     if (referencedGradient && referencedGradient.getAttribute(xlinkAttr)) {
       recursivelyParseGradientsXlink(doc, referencedGradient);
@@ -9793,6 +9903,7 @@ fabric.ElementsParser = function(elements, callback, options, reviver, parsingOp
      * Returns coordinates of a center of canvas.
      * Returned value is an object with top and left properties
      * @return {Object} object with "top" and "left" number values
+     * @deprecated migrate to `getCenterPoint`
      */
     getCenter: function () {
       return {
@@ -9802,12 +9913,20 @@ fabric.ElementsParser = function(elements, callback, options, reviver, parsingOp
     },
 
     /**
+     * Returns coordinates of a center of canvas.
+     * @return {fabric.Point} 
+     */
+    getCenterPoint: function () {
+      return new fabric.Point(this.width / 2, this.height / 2);
+    },
+
+    /**
      * Centers object horizontally in the canvas
      * @param {fabric.Object} object Object to center horizontally
      * @return {fabric.Canvas} thisArg
      */
     centerObjectH: function (object) {
-      return this._centerObject(object, new fabric.Point(this.getCenter().left, object.getCenterPoint().y));
+      return this._centerObject(object, new fabric.Point(this.getCenterPoint().x, object.getCenterPoint().y));
     },
 
     /**
@@ -9817,7 +9936,7 @@ fabric.ElementsParser = function(elements, callback, options, reviver, parsingOp
      * @chainable
      */
     centerObjectV: function (object) {
-      return this._centerObject(object, new fabric.Point(object.getCenterPoint().x, this.getCenter().top));
+      return this._centerObject(object, new fabric.Point(object.getCenterPoint().x, this.getCenterPoint().y));
     },
 
     /**
@@ -9827,9 +9946,8 @@ fabric.ElementsParser = function(elements, callback, options, reviver, parsingOp
      * @chainable
      */
     centerObject: function(object) {
-      var center = this.getCenter();
-
-      return this._centerObject(object, new fabric.Point(center.left, center.top));
+      var center = this.getCenterPoint();
+      return this._centerObject(object, center);
     },
 
     /**
@@ -9840,7 +9958,6 @@ fabric.ElementsParser = function(elements, callback, options, reviver, parsingOp
      */
     viewportCenterObject: function(object) {
       var vpCenter = this.getVpCenter();
-
       return this._centerObject(object, vpCenter);
     },
 
@@ -9874,9 +9991,9 @@ fabric.ElementsParser = function(elements, callback, options, reviver, parsingOp
      * @chainable
      */
     getVpCenter: function() {
-      var center = this.getCenter(),
+      var center = this.getCenterPoint(),
           iVpt = invertTransform(this.viewportTransform);
-      return transformPoint({ x: center.left, y: center.top }, iVpt);
+      return transformPoint(center, iVpt);
     },
 
     /**
@@ -12033,7 +12150,7 @@ fabric.PatternBrush = fabric.util.createClass(fabric.PencilBrush, /** @lends fab
     _isSelectionKeyPressed: function(e) {
       var selectionKeyPressed = false;
 
-      if (Object.prototype.toString.call(this.selectionKey) === '[object Array]') {
+      if (Array.isArray(this.selectionKey)) {
         selectionKeyPressed = !!this.selectionKey.find(function(key) { return e[key] === true; });
       }
       else {
@@ -12457,6 +12574,14 @@ fabric.PatternBrush = fabric.util.createClass(fabric.PencilBrush, /** @lends fab
       this._copyCanvasStyle(lowerCanvasEl, upperCanvasEl);
       this._applyCanvasStyle(upperCanvasEl);
       this.contextTop = upperCanvasEl.getContext('2d');
+    },
+
+    /**
+     * Returns context of top canvas where interactions are drawn
+     * @returns {CanvasRenderingContext2D}
+     */
+    getTopContext: function () {
+      return this.contextTop;
     },
 
     /**
@@ -12984,14 +13109,6 @@ fabric.PatternBrush = fabric.util.createClass(fabric.PencilBrush, /** @lends fab
         _target && target.fire('mouseout', { e: e });
       });
       this._hoveredTargets = [];
-
-      if (this._iTextInstances) {
-        this._iTextInstances.forEach(function(obj) {
-          if (obj.isEditing) {
-            obj.hiddenTextarea.focus();
-          }
-        });
-      }
     },
 
     /**
@@ -15236,11 +15353,9 @@ fabric.util.object.extend(fabric.StaticCanvas.prototype, /** @lends fabric.Stati
         if (object[prop] === prototype[prop]) {
           delete object[prop];
         }
-        var isArray = Object.prototype.toString.call(object[prop]) === '[object Array]' &&
-                      Object.prototype.toString.call(prototype[prop]) === '[object Array]';
-
         // basically a check for [] === []
-        if (isArray && object[prop].length === 0 && prototype[prop].length === 0) {
+        if (Array.isArray(object[prop]) && Array.isArray(prototype[prop])
+          && object[prop].length === 0 && prototype[prop].length === 0) {
           delete object[prop];
         }
       });
@@ -15416,7 +15531,7 @@ fabric.util.object.extend(fabric.StaticCanvas.prototype, /** @lends fabric.Stati
 
     renderCache: function(options) {
       options = options || {};
-      if (!this._cacheCanvas) {
+      if (!this._cacheCanvas || !this._cacheContext) {
         this._createCacheCanvas();
       }
       if (this.isCacheDirty()) {
@@ -15431,6 +15546,7 @@ fabric.util.object.extend(fabric.StaticCanvas.prototype, /** @lends fabric.Stati
      */
     _removeCacheCanvas: function() {
       this._cacheCanvas = null;
+      this._cacheContext = null;
       this.cacheWidth = 0;
       this.cacheHeight = 0;
     },
@@ -15589,7 +15705,7 @@ fabric.util.object.extend(fabric.StaticCanvas.prototype, /** @lends fabric.Stati
       if (this.isNotVisible()) {
         return false;
       }
-      if (this._cacheCanvas && !skipCanvas && this._updateCacheCanvas()) {
+      if (this._cacheCanvas && this._cacheContext && !skipCanvas && this._updateCacheCanvas()) {
         // in this case the context is already cleared.
         return true;
       }
@@ -15598,7 +15714,7 @@ fabric.util.object.extend(fabric.StaticCanvas.prototype, /** @lends fabric.Stati
           (this.clipPath && this.clipPath.absolutePositioned) ||
           (this.statefullCache && this.hasStateChanged('cacheProperties'))
         ) {
-          if (this._cacheCanvas && !skipCanvas) {
+          if (this._cacheCanvas && this._cacheContext && !skipCanvas) {
             var width = this.cacheWidth / this.zoomX;
             var height = this.cacheHeight / this.zoomY;
             this._cacheContext.clearRect(-width / 2, -height / 2, width, height);
@@ -16132,7 +16248,7 @@ fabric.util.object.extend(fabric.StaticCanvas.prototype, /** @lends fabric.Stati
      * @return {Boolean}
      */
     isType: function(type) {
-      return this.type === type;
+      return arguments.length > 1 ? Array.from(arguments).includes(this.type) : this.type === type;
     },
 
     /**
@@ -18070,7 +18186,7 @@ fabric.util.object.extend(fabric.StaticCanvas.prototype, /** @lends fabric.Stati
     return fabric.util.animate({
       target: this,
       startValue: object.left,
-      endValue: this.getCenter().left,
+      endValue: this.getCenterPoint().x,
       duration: this.FX_DURATION,
       onChange: function(value) {
         object.set('left', value);
@@ -18103,7 +18219,7 @@ fabric.util.object.extend(fabric.StaticCanvas.prototype, /** @lends fabric.Stati
     return fabric.util.animate({
       target: this,
       startValue: object.top,
-      endValue: this.getCenter().top,
+      endValue: this.getCenterPoint().y,
       duration: this.FX_DURATION,
       onChange: function(value) {
         object.set('top', value);
@@ -19642,7 +19758,6 @@ fabric.util.object.extend(fabric.Object.prototype, /** @lends fabric.Object.prot
       max = fabric.util.array.max,
       extend = fabric.util.object.extend,
       clone = fabric.util.object.clone,
-      _toString = Object.prototype.toString,
       toFixed = fabric.util.toFixed;
 
   if (fabric.Path) {
@@ -19696,10 +19811,8 @@ fabric.util.object.extend(fabric.Object.prototype, /** @lends fabric.Object.prot
     * @param {Object} [options] Options object
     */
     _setPath: function (path, options) {
-      var fromArray = _toString.call(path) === '[object Array]';
-
       this.path = fabric.util.makePathSimpler(
-        fromArray ? path : fabric.util.parsePath(path)
+        Array.isArray(path) ? path : fabric.util.parsePath(path)
       );
 
       fabric.Polyline.prototype._setPositionDimensions.call(this, options || {});
@@ -19978,7 +20091,15 @@ fabric.util.object.extend(fabric.Object.prototype, /** @lends fabric.Object.prot
       fabric.loadSVGFromURL(pathUrl, function (elements) {
         var path = elements[0];
         path.setOptions(object);
-        callback && callback(path);
+        if (object.clipPath) {
+          fabric.util.enlivenObjects([object.clipPath], function(elivenedObjects) {
+            path.clipPath = elivenedObjects[0];
+            callback && callback(path);
+          });
+        }
+        else {
+          callback && callback(path);
+        }
       });
     }
     else {
@@ -20585,20 +20706,27 @@ fabric.util.object.extend(fabric.Object.prototype, /** @lends fabric.Object.prot
       // it has to be an url or something went wrong.
       fabric.loadSVGFromURL(objects, function (elements) {
         var group = fabric.util.groupSVGElements(elements, object, objects);
+        var clipPath = options.clipPath;
+        delete options.clipPath;
         group.set(options);
-        callback && callback(group);
+        if (clipPath) {
+          fabric.util.enlivenObjects([clipPath], function(elivenedObjects) {
+            group.clipPath = elivenedObjects[0];
+            callback && callback(group);
+          });
+        }
+        else {
+          callback && callback(group);
+        }
       });
       return;
     }
     fabric.util.enlivenObjects(objects, function (enlivenedObjects) {
-      var options = fabric.util.object.clone(object, true);
-      delete options.objects;
       fabric.util.enlivenObjectEnlivables(object, options, function () {
         callback && callback(new fabric.Group(enlivenedObjects, options, true));
       });
     });
   };
-
 })(typeof exports !== 'undefined' ? exports : this);
 
 
@@ -21860,13 +21988,14 @@ fabric.util.object.extend(fabric.StaticCanvas.prototype, /** @lends fabric.Stati
      * @param {Number} width The width to initialize the texture at.
      * @param {Number} height The height to initialize the texture.
      * @param {HTMLImageElement|HTMLCanvasElement} textureImageSource A source for the texture data.
+     * @param {Number} filterType gl.NEAREST or gl.LINEAR usually, webgl numeri constants
      * @returns {WebGLTexture}
      */
-    createTexture: function(gl, width, height, textureImageSource) {
+    createTexture: function(gl, width, height, textureImageSource, filterType) {
       var texture = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, texture);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filterType || gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filterType || gl.NEAREST);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       if (textureImageSource) {
@@ -26846,7 +26975,7 @@ fabric.Image.filters.BaseFilter.fromObject = function(object, callback) {
           // if we have charSpacing, we render char by char
           actualStyle = actualStyle || this.getCompleteStyleDeclaration(lineIndex, i);
           nextStyle = this.getCompleteStyleDeclaration(lineIndex, i + 1);
-          timeToRender = this._hasStyleChanged(actualStyle, nextStyle);
+          timeToRender = fabric.util.hasStyleChanged(actualStyle, nextStyle, false);
         }
         if (timeToRender) {
           if (path) {
@@ -27014,34 +27143,6 @@ fabric.Image.filters.BaseFilter.fromObject = function(object, callback) {
           style = { fontSize: fontSize * schema.size, deltaY: dy + fontSize * schema.baseline };
       this.setSelectionStyles(style, start, end);
       return this;
-    },
-
-    /**
-     * @private
-     * @param {Object} prevStyle
-     * @param {Object} thisStyle
-     */
-    _hasStyleChanged: function(prevStyle, thisStyle) {
-      return prevStyle.fill !== thisStyle.fill ||
-              prevStyle.stroke !== thisStyle.stroke ||
-              prevStyle.strokeWidth !== thisStyle.strokeWidth ||
-              prevStyle.fontSize !== thisStyle.fontSize ||
-              prevStyle.fontFamily !== thisStyle.fontFamily ||
-              prevStyle.fontWeight !== thisStyle.fontWeight ||
-              prevStyle.fontStyle !== thisStyle.fontStyle ||
-              prevStyle.deltaY !== thisStyle.deltaY;
-    },
-
-    /**
-     * @private
-     * @param {Object} prevStyle
-     * @param {Object} thisStyle
-     */
-    _hasStyleChangedForSvg: function(prevStyle, thisStyle) {
-      return this._hasStyleChanged(prevStyle, thisStyle) ||
-        prevStyle.overline !== thisStyle.overline ||
-        prevStyle.underline !== thisStyle.underline ||
-        prevStyle.linethrough !== thisStyle.linethrough;
     },
 
     /**
@@ -27305,8 +27406,7 @@ fabric.Image.filters.BaseFilter.fromObject = function(object, callback) {
     toObject: function(propertiesToInclude) {
       var allProperties = additionalProps.concat(propertiesToInclude);
       var obj = this.callSuper('toObject', allProperties);
-      // styles will be overridden with a properly cloned structure
-      obj.styles = clone(this.styles, true);
+      obj.styles = fabric.util.stylesToArray(this.styles, this.text);
       if (obj.path) {
         obj.path = this.path.toObject();
       }
@@ -27472,6 +27572,7 @@ fabric.Image.filters.BaseFilter.fromObject = function(object, callback) {
     var objectCopy = clone(object), path = object.path;
     delete objectCopy.path;
     return fabric.Object._fromObject('Text', objectCopy, function(textInstance) {
+      textInstance.styles = fabric.util.stylesFromArray(object.styles, object.text);
       if (path) {
         fabric.Object._fromObject('Path', path, function(pathInstance) {
           textInstance.set('path', pathInstance);
@@ -28329,15 +28430,18 @@ fabric.Image.filters.BaseFilter.fromObject = function(object, callback) {
    * @param {function} [callback] invoked with new instance as argument
    */
   fabric.IText.fromObject = function(object, callback) {
-    parseDecoration(object);
-    if (object.styles) {
-      for (var i in object.styles) {
-        for (var j in object.styles[i]) {
-          parseDecoration(object.styles[i][j]);
+    var styles = fabric.util.stylesFromArray(object.styles, object.text);
+    //copy object to prevent mutation
+    var objCopy = Object.assign({}, object, { styles: styles });
+    parseDecoration(objCopy);
+    if (objCopy.styles) {
+      for (var i in objCopy.styles) {
+        for (var j in objCopy.styles[i]) {
+          parseDecoration(objCopy.styles[i][j]);
         }
       }
     }
-    fabric.Object._fromObject('IText', object, callback, 'text');
+    fabric.Object._fromObject('IText', objCopy, callback, 'text');
   };
 })();
 
@@ -28729,6 +28833,9 @@ fabric.Image.filters.BaseFilter.fromObject = function(object, callback) {
       if (!this.__isMousedown || !this.isEditing) {
         return;
       }
+
+      // regain focus
+      document.activeElement !== this.hiddenTextarea && this.hiddenTextarea.focus();
 
       var newSelectionStart = this.getSelectionStartFromPointer(options.e),
           currentStart = this.selectionStart,
@@ -29579,7 +29686,7 @@ fabric.util.object.extend(fabric.IText.prototype, /** @lends fabric.IText.protot
     // https://bugs.chromium.org/p/chromium/issues/detail?id=870966
     this.hiddenTextarea.style.cssText = 'position: absolute; top: ' + style.top +
     '; left: ' + style.left + '; z-index: -999; opacity: 0; width: 1px; height: 1px; font-size: 1px;' +
-    ' paddingｰtop: ' + style.fontSize + ';';
+    ' padding-top: ' + style.fontSize + ';';
 
     if (this.hiddenTextareaContainer) {
       this.hiddenTextareaContainer.appendChild(this.hiddenTextarea);
@@ -30083,7 +30190,7 @@ fabric.util.object.extend(fabric.IText.prototype, /** @lends fabric.IText.protot
       this[prop] += direction === 'Left' ? -1 : 1;
       return true;
     }
-    if (typeof newValue !== undefined && this[prop] !== newValue) {
+    if (typeof newValue !== 'undefined' && this[prop] !== newValue) {
       this[prop] = newValue;
       return true;
     }
@@ -30401,7 +30508,7 @@ fabric.util.object.extend(fabric.IText.prototype, /** @lends fabric.IText.protot
           // if we have charSpacing, we render char by char
           actualStyle = actualStyle || this.getCompleteStyleDeclaration(lineIndex, i);
           nextStyle = this.getCompleteStyleDeclaration(lineIndex, i + 1);
-          timeToRender = this._hasStyleChangedForSvg(actualStyle, nextStyle);
+          timeToRender = fabric.util.hasStyleChanged(actualStyle, nextStyle, true);
         }
         if (timeToRender) {
           style = this._getStyleDeclaration(lineIndex, i) || { };
@@ -30955,7 +31062,10 @@ fabric.util.object.extend(fabric.IText.prototype, /** @lends fabric.IText.protot
    * @param {Function} [callback] Callback to invoke when an fabric.Textbox instance is created
    */
   fabric.Textbox.fromObject = function(object, callback) {
-    return fabric.Object._fromObject('Textbox', object, callback, 'text');
+    var styles = fabric.util.stylesFromArray(object.styles, object.text);
+    //copy object to prevent mutation
+    var objCopy = Object.assign({}, object, { styles: styles });
+    return fabric.Object._fromObject('Textbox', objCopy, callback, 'text');
   };
 })(typeof exports !== 'undefined' ? exports : this);
 
@@ -31073,5 +31183,770 @@ fabric.util.object.extend(fabric.IText.prototype, /** @lends fabric.IText.protot
       actionName: 'resizing',
     });
   }
+})();
+
+
+(function () {
+  /** ERASER_START */
+
+  /**
+   * add `eraser` to enlivened props
+   */
+  fabric.Object.ENLIVEN_PROPS.push('eraser');
+
+  var __drawClipPath = fabric.Object.prototype._drawClipPath;
+  var _needsItsOwnCache = fabric.Object.prototype.needsItsOwnCache;
+  var _toObject = fabric.Object.prototype.toObject;
+  var _getSvgCommons = fabric.Object.prototype.getSvgCommons;
+  var __createBaseClipPathSVGMarkup = fabric.Object.prototype._createBaseClipPathSVGMarkup;
+  var __createBaseSVGMarkup = fabric.Object.prototype._createBaseSVGMarkup;
+
+  fabric.Object.prototype.cacheProperties.push('eraser');
+  fabric.Object.prototype.stateProperties.push('eraser');
+
+  /**
+   * @fires erasing:end
+   */
+  fabric.util.object.extend(fabric.Object.prototype, {
+    /**
+     * Indicates whether this object can be erased by {@link fabric.EraserBrush}
+     * The `deep` option introduces fine grained control over a group's `erasable` property.
+     * When set to `deep` the eraser will erase nested objects if they are erasable, leaving the group and the other objects untouched.
+     * When set to `true` the eraser will erase the entire group. Once the group changes the eraser is propagated to its children for proper functionality.
+     * When set to `false` the eraser will leave all objects including the group untouched.
+     * @tutorial {@link http://fabricjs.com/erasing#erasable_property}
+     * @type boolean | 'deep'
+     * @default true
+     */
+    erasable: true,
+
+    /**
+     * @tutorial {@link http://fabricjs.com/erasing#eraser}
+     * @type fabric.Eraser
+     */
+    eraser: undefined,
+
+    /**
+     * @override
+     * @returns Boolean
+     */
+    needsItsOwnCache: function () {
+      return _needsItsOwnCache.call(this) || !!this.eraser;
+    },
+
+    /**
+     * draw eraser above clip path
+     * @override
+     * @private
+     * @param {CanvasRenderingContext2D} ctx
+     * @param {fabric.Object} clipPath
+     */
+    _drawClipPath: function (ctx, clipPath) {
+      __drawClipPath.call(this, ctx, clipPath);
+      if (this.eraser) {
+        //  update eraser size to match instance
+        var size = this._getNonTransformedDimensions();
+        this.eraser.isType('eraser') && this.eraser.set({
+          width: size.x,
+          height: size.y
+        });
+        __drawClipPath.call(this, ctx, this.eraser);
+      }
+    },
+
+    /**
+     * Returns an object representation of an instance
+     * @param {Array} [propertiesToInclude] Any properties that you might want to additionally include in the output
+     * @return {Object} Object representation of an instance
+     */
+    toObject: function (propertiesToInclude) {
+      var object = _toObject.call(this, ['erasable'].concat(propertiesToInclude));
+      if (this.eraser && !this.eraser.excludeFromExport) {
+        object.eraser = this.eraser.toObject(propertiesToInclude);
+      }
+      return object;
+    },
+
+    /* _TO_SVG_START_ */
+    /**
+     * Returns id attribute for svg output
+     * @override
+     * @return {String}
+     */
+    getSvgCommons: function () {
+      return _getSvgCommons.call(this) + (this.eraser ? 'mask="url(#' + this.eraser.clipPathId + ')" ' : '');
+    },
+
+    /**
+     * create svg markup for eraser
+     * use <mask> to achieve erasing for svg, credit: https://travishorn.com/removing-parts-of-shapes-in-svg-b539a89e5649
+     * must be called before object markup creation as it relies on the `clipPathId` property of the mask
+     * @param {Function} [reviver]
+     * @returns
+     */
+    _createEraserSVGMarkup: function (reviver) {
+      if (this.eraser) {
+        this.eraser.clipPathId = 'MASK_' + fabric.Object.__uid++;
+        return [
+          '<mask id="', this.eraser.clipPathId, '" >',
+          this.eraser.toSVG(reviver),
+          '</mask>', '\n'
+        ].join('');
+      }
+      return '';
+    },
+
+    /**
+     * @private
+     */
+    _createBaseClipPathSVGMarkup: function (objectMarkup, options) {
+      return [
+        this._createEraserSVGMarkup(options && options.reviver),
+        __createBaseClipPathSVGMarkup.call(this, objectMarkup, options)
+      ].join('');
+    },
+
+    /**
+     * @private
+     */
+    _createBaseSVGMarkup: function (objectMarkup, options) {
+      return [
+        this._createEraserSVGMarkup(options && options.reviver),
+        __createBaseSVGMarkup.call(this, objectMarkup, options)
+      ].join('');
+    }
+    /* _TO_SVG_END_ */
+  });
+
+  var __restoreObjectsState = fabric.Group.prototype._restoreObjectsState;
+  fabric.util.object.extend(fabric.Group.prototype, {
+    /**
+     * @private
+     * @param {fabric.Path} path
+     */
+    _addEraserPathToObjects: function (path) {
+      this._objects.forEach(function (object) {
+        fabric.EraserBrush.prototype._addPathToObjectEraser.call(
+          fabric.EraserBrush.prototype,
+          object,
+          path
+        );
+      });
+    },
+
+    /**
+     * Applies the group's eraser to its objects
+     * @tutorial {@link http://fabricjs.com/erasing#erasable_property}
+     */
+    applyEraserToObjects: function () {
+      var _this = this, eraser = this.eraser;
+      if (eraser) {
+        delete this.eraser;
+        var transform = _this.calcTransformMatrix();
+        eraser.clone(function (eraser) {
+          var clipPath = _this.clipPath;
+          eraser.getObjects('path')
+            .forEach(function (path) {
+              //  first we transform the path from the group's coordinate system to the canvas'
+              var originalTransform = fabric.util.multiplyTransformMatrices(
+                transform,
+                path.calcTransformMatrix()
+              );
+              fabric.util.applyTransformToObject(path, originalTransform);
+              if (clipPath) {
+                clipPath.clone(function (_clipPath) {
+                  var eraserPath = fabric.EraserBrush.prototype.applyClipPathToPath.call(
+                    fabric.EraserBrush.prototype,
+                    path,
+                    _clipPath,
+                    transform
+                  );
+                  _this._addEraserPathToObjects(eraserPath);
+                }, ['absolutePositioned', 'inverted']);
+              }
+              else {
+                _this._addEraserPathToObjects(path);
+              }
+            });
+        });
+      }
+    },
+
+    /**
+     * Propagate the group's eraser to its objects, crucial for proper functionality of the eraser within the group and nested objects.
+     * @private
+     */
+    _restoreObjectsState: function () {
+      this.erasable === true && this.applyEraserToObjects();
+      return __restoreObjectsState.call(this);
+    }
+  });
+
+  /**
+   * An object's Eraser
+   * @private
+   * @class fabric.Eraser
+   * @extends fabric.Group
+   * @memberof fabric
+   */
+  fabric.Eraser = fabric.util.createClass(fabric.Group, {
+    /**
+     * @readonly
+     * @static
+     */
+    type: 'eraser',
+
+    /**
+     * @default
+     */
+    originX: 'center',
+
+    /**
+     * @default
+     */
+    originY: 'center',
+
+    drawObject: function (ctx) {
+      ctx.save();
+      ctx.fillStyle = 'black';
+      ctx.fillRect(-this.width / 2, -this.height / 2, this.width, this.height);
+      ctx.restore();
+      this.callSuper('drawObject', ctx);
+    },
+
+    /**
+     * eraser should retain size
+     * dimensions should not change when paths are added or removed
+     * handled by {@link fabric.Object#_drawClipPath}
+     * @override
+     * @private
+     */
+    _getBounds: function () {
+      //  noop
+    },
+
+    /* _TO_SVG_START_ */
+    /**
+     * Returns svg representation of an instance
+     * use <mask> to achieve erasing for svg, credit: https://travishorn.com/removing-parts-of-shapes-in-svg-b539a89e5649
+     * for masking we need to add a white rect before all paths
+     *
+     * @param {Function} [reviver] Method for further parsing of svg representation.
+     * @return {String} svg representation of an instance
+     */
+    _toSVG: function (reviver) {
+      var svgString = ['<g ', 'COMMON_PARTS', ' >\n'];
+      var x = -this.width / 2, y = -this.height / 2;
+      var rectSvg = [
+        '<rect ', 'fill="white" ',
+        'x="', x, '" y="', y,
+        '" width="', this.width, '" height="', this.height,
+        '" />\n'
+      ].join('');
+      svgString.push('\t\t', rectSvg);
+      for (var i = 0, len = this._objects.length; i < len; i++) {
+        svgString.push('\t\t', this._objects[i].toSVG(reviver));
+      }
+      svgString.push('</g>\n');
+      return svgString;
+    },
+    /* _TO_SVG_END_ */
+  });
+
+  /**
+   * Returns {@link fabric.Eraser} instance from an object representation
+   * @static
+   * @memberOf fabric.Eraser
+   * @param {Object} object Object to create an Eraser from
+   * @param {Function} [callback] Callback to invoke when an eraser instance is created
+   */
+  fabric.Eraser.fromObject = function (object, callback) {
+    var objects = object.objects;
+    fabric.util.enlivenObjects(objects, function (enlivenedObjects) {
+      var options = fabric.util.object.clone(object, true);
+      delete options.objects;
+      fabric.util.enlivenObjectEnlivables(object, options, function () {
+        callback && callback(new fabric.Eraser(enlivenedObjects, options, true));
+      });
+    });
+  };
+
+  var __renderOverlay = fabric.Canvas.prototype._renderOverlay;
+  /**
+   * @fires erasing:start
+   * @fires erasing:end
+   */
+  fabric.util.object.extend(fabric.Canvas.prototype, {
+    /**
+     * Used by {@link #renderAll}
+     * @returns boolean
+     */
+    isErasing: function () {
+      return (
+        this.isDrawingMode &&
+        this.freeDrawingBrush &&
+        this.freeDrawingBrush.type === 'eraser' &&
+        this.freeDrawingBrush._isErasing
+      );
+    },
+
+    /**
+     * While erasing the brush clips out the erasing path from canvas
+     * so we need to render it on top of canvas every render
+     * @param {CanvasRenderingContext2D} ctx
+     */
+    _renderOverlay: function (ctx) {
+      __renderOverlay.call(this, ctx);
+      if (this.isErasing() && !this.freeDrawingBrush.inverted) {
+        this.freeDrawingBrush._render();
+      }
+    }
+  });
+
+  /**
+   * EraserBrush class
+   * Supports selective erasing meaning that only erasable objects are affected by the eraser brush.
+   * Supports **inverted** erasing meaning that the brush can "undo" erasing.
+   *
+   * In order to support selective erasing, the brush clips the entire canvas
+   * and then draws all non-erasable objects over the erased path using a pattern brush so to speak (masking).
+   * If brush is **inverted** there is no need to clip canvas. The brush draws all erasable objects without their eraser.
+   * This achieves the desired effect of seeming to erase or unerase only erasable objects.
+   * After erasing is done the created path is added to all intersected objects' `eraser` property.
+   *
+   * In order to update the EraserBrush call `preparePattern`.
+   * It may come in handy when canvas changes during erasing (i.e animations) and you want the eraser to reflect the changes.
+   *
+   * @tutorial {@link http://fabricjs.com/erasing}
+   * @class fabric.EraserBrush
+   * @extends fabric.PencilBrush
+   * @memberof fabric
+   */
+  fabric.EraserBrush = fabric.util.createClass(
+    fabric.PencilBrush,
+    /** @lends fabric.EraserBrush.prototype */ {
+      type: 'eraser',
+
+      /**
+       * When set to `true` the brush will create a visual effect of undoing erasing
+       */
+      inverted: false,
+
+      /**
+       * @private
+       */
+      _isErasing: false,
+
+      /**
+       *
+       * @private
+       * @param {fabric.Object} object
+       * @returns boolean
+       */
+      _isErasable: function (object) {
+        return object.erasable !== false;
+      },
+
+      /**
+       * @private
+       * This is designed to support erasing a collection with both erasable and non-erasable objects.
+       * Iterates over collections to allow nested selective erasing.
+       * Prepares the pattern brush that will draw on the top context to achieve the desired visual effect.
+       * If brush is **NOT** inverted render all non-erasable objects.
+       * If brush is inverted render all erasable objects that have been erased with their clip path inverted.
+       * This will render the erased parts as if they were not erased.
+       *
+       * @param {fabric.Collection} collection
+       * @param {CanvasRenderingContext2D} ctx
+       * @param {{ visibility: fabric.Object[], eraser: fabric.Object[], collection: fabric.Object[] }} restorationContext
+       */
+      _prepareCollectionTraversal: function (collection, ctx, restorationContext) {
+        collection.forEachObject(function (obj) {
+          if (obj.forEachObject && obj.erasable === 'deep') {
+            //  traverse
+            this._prepareCollectionTraversal(obj, ctx, restorationContext);
+          }
+          else if (!this.inverted && obj.erasable && obj.visible) {
+            //  render only non-erasable objects
+            obj.visible = false;
+            collection.dirty = true;
+            restorationContext.visibility.push(obj);
+            restorationContext.collection.push(collection);
+          }
+          else if (this.inverted && obj.visible) {
+            //  render only erasable objects that were erased
+            if (obj.erasable && obj.eraser) {
+              obj.eraser.inverted = true;
+              obj.dirty = true;
+              collection.dirty = true;
+              restorationContext.eraser.push(obj);
+              restorationContext.collection.push(collection);
+            }
+            else {
+              obj.visible = false;
+              collection.dirty = true;
+              restorationContext.visibility.push(obj);
+              restorationContext.collection.push(collection);
+            }
+          }
+        }, this);
+      },
+
+      /**
+       * Prepare the pattern for the erasing brush
+       * This pattern will be drawn on the top context, achieving a visual effect of erasing only erasable objects
+       * @todo decide how overlay color should behave when `inverted === true`, currently draws over it which is undesirable
+       * @private
+       */
+      preparePattern: function () {
+        if (!this._patternCanvas) {
+          this._patternCanvas = fabric.util.createCanvasElement();
+        }
+        var canvas = this._patternCanvas;
+        canvas.width = this.canvas.width;
+        canvas.height = this.canvas.height;
+        var patternCtx = canvas.getContext('2d');
+        if (this.canvas._isRetinaScaling()) {
+          var retinaScaling = this.canvas.getRetinaScaling();
+          this.canvas.__initRetinaScaling(retinaScaling, canvas, patternCtx);
+        }
+        var backgroundImage = this.canvas.backgroundImage,
+            bgErasable = backgroundImage && this._isErasable(backgroundImage),
+            overlayImage = this.canvas.overlayImage,
+            overlayErasable = overlayImage && this._isErasable(overlayImage);
+        if (!this.inverted && ((backgroundImage && !bgErasable) || !!this.canvas.backgroundColor)) {
+          if (bgErasable) { this.canvas.backgroundImage = undefined; }
+          this.canvas._renderBackground(patternCtx);
+          if (bgErasable) { this.canvas.backgroundImage = backgroundImage; }
+        }
+        else if (this.inverted && (backgroundImage && bgErasable)) {
+          var color = this.canvas.backgroundColor;
+          this.canvas.backgroundColor = undefined;
+          this.canvas._renderBackground(patternCtx);
+          this.canvas.backgroundColor = color;
+        }
+        patternCtx.save();
+        patternCtx.transform.apply(patternCtx, this.canvas.viewportTransform);
+        var restorationContext = { visibility: [], eraser: [], collection: [] };
+        this._prepareCollectionTraversal(this.canvas, patternCtx, restorationContext);
+        this.canvas._renderObjects(patternCtx, this.canvas._objects);
+        restorationContext.visibility.forEach(function (obj) { obj.visible = true; });
+        restorationContext.eraser.forEach(function (obj) {
+          obj.eraser.inverted = false;
+          obj.dirty = true;
+        });
+        restorationContext.collection.forEach(function (obj) { obj.dirty = true; });
+        patternCtx.restore();
+        if (!this.inverted && ((overlayImage && !overlayErasable) || !!this.canvas.overlayColor)) {
+          if (overlayErasable) { this.canvas.overlayImage = undefined; }
+          __renderOverlay.call(this.canvas, patternCtx);
+          if (overlayErasable) { this.canvas.overlayImage = overlayImage; }
+        }
+        else if (this.inverted && (overlayImage && overlayErasable)) {
+          var color = this.canvas.overlayColor;
+          this.canvas.overlayColor = undefined;
+          __renderOverlay.call(this.canvas, patternCtx);
+          this.canvas.overlayColor = color;
+        }
+      },
+
+      /**
+       * Sets brush styles
+       * @private
+       * @param {CanvasRenderingContext2D} ctx
+       */
+      _setBrushStyles: function (ctx) {
+        this.callSuper('_setBrushStyles', ctx);
+        ctx.strokeStyle = 'black';
+      },
+
+      /**
+       * **Customiztion**
+       *
+       * if you need the eraser to update on each render (i.e animating during erasing) override this method by **adding** the following (performance may suffer):
+       * @example
+       * ```
+       * if(ctx === this.canvas.contextTop) {
+       *  this.preparePattern();
+       * }
+       * ```
+       *
+       * @override fabric.BaseBrush#_saveAndTransform
+       * @param {CanvasRenderingContext2D} ctx
+       */
+      _saveAndTransform: function (ctx) {
+        this.callSuper('_saveAndTransform', ctx);
+        this._setBrushStyles(ctx);
+        ctx.globalCompositeOperation = ctx === this.canvas.getContext() ? 'destination-out' : 'source-over';
+      },
+
+      /**
+       * We indicate {@link fabric.PencilBrush} to repaint itself if necessary
+       * @returns
+       */
+      needsFullRender: function () {
+        return true;
+      },
+
+      /**
+       *
+       * @param {fabric.Point} pointer
+       * @param {fabric.IEvent} options
+       * @returns
+       */
+      onMouseDown: function (pointer, options) {
+        if (!this.canvas._isMainEvent(options.e)) {
+          return;
+        }
+        this._prepareForDrawing(pointer);
+        // capture coordinates immediately
+        // this allows to draw dots (when movement never occurs)
+        this._captureDrawingPath(pointer);
+
+        //  prepare for erasing
+        this.preparePattern();
+        this._isErasing = true;
+        this.canvas.fire('erasing:start');
+        this._render();
+      },
+
+      /**
+       * Rendering Logic:
+       * 1. Use brush to clip canvas by rendering it on top of canvas (unnecessary if `inverted === true`)
+       * 2. Render brush with canvas pattern on top context
+       *
+       */
+      _render: function () {
+        var ctx;
+        if (!this.inverted) {
+          //  clip canvas
+          ctx = this.canvas.getContext();
+          this.callSuper('_render', ctx);
+        }
+        //  render brush and mask it with image of non erasables
+        ctx = this.canvas.contextTop;
+        this.canvas.clearContext(ctx);
+        this.callSuper('_render', ctx);
+        ctx.save();
+        var t = this.canvas.getRetinaScaling(), s = 1 / t;
+        ctx.scale(s, s);
+        ctx.globalCompositeOperation = 'source-in';
+        ctx.drawImage(this._patternCanvas, 0, 0);
+        ctx.restore();
+      },
+
+      /**
+       * Creates fabric.Path object
+       * @override
+       * @private
+       * @param {(string|number)[][]} pathData Path data
+       * @return {fabric.Path} Path to add on canvas
+       * @returns
+       */
+      createPath: function (pathData) {
+        var path = this.callSuper('createPath', pathData);
+        path.globalCompositeOperation = this.inverted ? 'source-over' : 'destination-out';
+        path.stroke = this.inverted ? 'white' : 'black';
+        return path;
+      },
+
+      /**
+       * Utility to apply a clip path to a path.
+       * Used to preserve clipping on eraser paths in nested objects.
+       * Called when a group has a clip path that should be applied to the path before applying erasing on the group's objects.
+       * @param {fabric.Path} path The eraser path in canvas coordinate plane
+       * @param {fabric.Object} clipPath The clipPath to apply to the path
+       * @param {number[]} clipPathContainerTransformMatrix The transform matrix of the object that the clip path belongs to
+       * @returns {fabric.Path} path with clip path
+       */
+      applyClipPathToPath: function (path, clipPath, clipPathContainerTransformMatrix) {
+        var pathInvTransform = fabric.util.invertTransform(path.calcTransformMatrix()),
+            clipPathTransform = clipPath.calcTransformMatrix(),
+            transform = clipPath.absolutePositioned ?
+              pathInvTransform :
+              fabric.util.multiplyTransformMatrices(
+                pathInvTransform,
+                clipPathContainerTransformMatrix
+              );
+        //  when passing down a clip path it becomes relative to the parent
+        //  so we transform it acoordingly and set `absolutePositioned` to false
+        clipPath.absolutePositioned = false;
+        fabric.util.applyTransformToObject(
+          clipPath,
+          fabric.util.multiplyTransformMatrices(
+            transform,
+            clipPathTransform
+          )
+        );
+        //  We need to clip `path` with both `clipPath` and it's own clip path if existing (`path.clipPath`)
+        //  so in turn `path` erases an object only where it overlaps with all it's clip paths, regardless of how many there are.
+        //  this is done because both clip paths may have nested clip paths of their own (this method walks down a collection => this may reccur),
+        //  so we can't assign one to the other's clip path property.
+        path.clipPath = path.clipPath ? fabric.util.mergeClipPaths(clipPath, path.clipPath) : clipPath;
+        return path;
+      },
+
+      /**
+       * Utility to apply a clip path to a path.
+       * Used to preserve clipping on eraser paths in nested objects.
+       * Called when a group has a clip path that should be applied to the path before applying erasing on the group's objects.
+       * @param {fabric.Path} path The eraser path
+       * @param {fabric.Object} object The clipPath to apply to path belongs to object
+       * @param {Function} callback Callback to be invoked with the cloned path after applying the clip path
+       */
+      clonePathWithClipPath: function (path, object, callback) {
+        var objTransform = object.calcTransformMatrix();
+        var clipPath = object.clipPath;
+        var _this = this;
+        path.clone(function (_path) {
+          clipPath.clone(function (_clipPath) {
+            callback(_this.applyClipPathToPath(_path, _clipPath, objTransform));
+          }, ['absolutePositioned', 'inverted']);
+        });
+      },
+
+      /**
+       * Adds path to object's eraser, walks down object's descendants if necessary
+       *
+       * @fires erasing:end on object
+       * @param {fabric.Object} obj
+       * @param {fabric.Path} path
+       */
+      _addPathToObjectEraser: function (obj, path) {
+        var _this = this;
+        //  object is collection, i.e group
+        if (obj.forEachObject && obj.erasable === 'deep') {
+          var targets = obj._objects.filter(function (_obj) {
+            return _obj.erasable;
+          });
+          if (targets.length > 0 && obj.clipPath) {
+            this.clonePathWithClipPath(path, obj, function (_path) {
+              targets.forEach(function (_obj) {
+                _this._addPathToObjectEraser(_obj, _path);
+              });
+            });
+          }
+          else if (targets.length > 0) {
+            targets.forEach(function (_obj) {
+              _this._addPathToObjectEraser(_obj, path);
+            });
+          }
+          return;
+        }
+        //  prepare eraser
+        var eraser = obj.eraser;
+        if (!eraser) {
+          eraser = new fabric.Eraser();
+          obj.eraser = eraser;
+        }
+        //  clone and add path
+        path.clone(function (path) {
+          // http://fabricjs.com/using-transformations
+          var desiredTransform = fabric.util.multiplyTransformMatrices(
+            fabric.util.invertTransform(
+              obj.calcTransformMatrix()
+            ),
+            path.calcTransformMatrix()
+          );
+          fabric.util.applyTransformToObject(path, desiredTransform);
+          eraser.addWithUpdate(path);
+          obj.set('dirty', true);
+          obj.fire('erasing:end', {
+            path: path
+          });
+          if (obj.group && Array.isArray(_this.__subTargets)) {
+            _this.__subTargets.push(obj);
+          }
+        });
+      },
+
+      /**
+       * Add the eraser path to canvas drawables' clip paths
+       *
+       * @param {fabric.Canvas} source
+       * @param {fabric.Canvas} path
+       * @returns {Object} canvas drawables that were erased by the path
+       */
+      applyEraserToCanvas: function (path) {
+        var canvas = this.canvas;
+        var drawables = {};
+        [
+          'backgroundImage',
+          'overlayImage',
+        ].forEach(function (prop) {
+          var drawable = canvas[prop];
+          if (drawable && drawable.erasable) {
+            this._addPathToObjectEraser(drawable, path);
+            drawables[prop] = drawable;
+          }
+        }, this);
+        return drawables;
+      },
+
+      /**
+       * On mouseup after drawing the path on contextTop canvas
+       * we use the points captured to create an new fabric path object
+       * and add it to every intersected erasable object.
+       */
+      _finalizeAndAddPath: function () {
+        var ctx = this.canvas.contextTop, canvas = this.canvas;
+        ctx.closePath();
+        if (this.decimate) {
+          this._points = this.decimatePoints(this._points, this.decimate);
+        }
+
+        // clear
+        canvas.clearContext(canvas.contextTop);
+        this._isErasing = false;
+
+        var pathData = this._points && this._points.length > 1 ?
+          this.convertPointsToSVGPath(this._points) :
+          null;
+        if (!pathData || this._isEmptySVGPath(pathData)) {
+          canvas.fire('erasing:end');
+          // do not create 0 width/height paths, as they are
+          // rendered inconsistently across browsers
+          // Firefox 4, for example, renders a dot,
+          // whereas Chrome 10 renders nothing
+          canvas.requestRenderAll();
+          return;
+        }
+
+        var path = this.createPath(pathData);
+        //  needed for `intersectsWithObject`
+        path.setCoords();
+        //  commense event sequence
+        canvas.fire('before:path:created', { path: path });
+
+        // finalize erasing
+        var drawables = this.applyEraserToCanvas(path);
+        var _this = this;
+        this.__subTargets = [];
+        var targets = [];
+        canvas.forEachObject(function (obj) {
+          if (obj.erasable && obj.intersectsWithObject(path, true, true)) {
+            _this._addPathToObjectEraser(obj, path);
+            targets.push(obj);
+          }
+        });
+        //  fire erasing:end
+        canvas.fire('erasing:end', {
+          path: path,
+          targets: targets,
+          subTargets: this.__subTargets,
+          drawables: drawables
+        });
+        delete this.__subTargets;
+
+        canvas.requestRenderAll();
+        this._resetShadow();
+
+        // fire event 'path' created
+        canvas.fire('path:created', { path: path });
+      }
+    }
+  );
+
+  /** ERASER_END */
 })();
 
